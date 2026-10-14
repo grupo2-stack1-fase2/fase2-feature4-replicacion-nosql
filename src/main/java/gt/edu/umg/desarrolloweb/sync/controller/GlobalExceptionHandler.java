@@ -1,6 +1,7 @@
 package gt.edu.umg.desarrolloweb.sync.controller;
 
 import gt.edu.umg.desarrolloweb.sync.api.dto.ErrorDto;
+import gt.edu.umg.desarrolloweb.sync.service.JobEnCursoException;
 import gt.edu.umg.desarrolloweb.sync.service.JobNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +20,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(JobNotFoundException.class)
     public ResponseEntity<ErrorDto> notFound(JobNotFoundException ex) {
         return build(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    // POST mientras otro job sigue PENDIENTE o EN_PROGRESO
+    @ExceptionHandler(JobEnCursoException.class)
+    public ResponseEntity<ErrorDto> conflict(JobEnCursoException ex) {
+        return build(HttpStatus.CONFLICT, ex.getMessage());
     }
 
     // jobId que no es un UUID valido, por ejemplo /api/sync/jobs/abc
