@@ -1,0 +1,20 @@
+# La configuracion vive aqui, no en el codigo. ${VARIABLE:default}: la variable de entorno gana.
+server:
+  port: ${SERVER_PORT:8084}
+  error:
+    include-stacktrace: never   # nunca devolver el stack trace al cliente
+
+spring:
+  application:
+    name: sync-service
+
+springdoc:
+  swagger-ui:
+    # Swagger UI muestra NUESTRO contrato (el YAML), no uno inferido del codigo
+    url: /openapi/sync-api.yaml
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
