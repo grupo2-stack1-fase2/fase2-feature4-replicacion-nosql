@@ -1,4 +1,5 @@
-# La configuracion vive aqui, no en el codigo. ${VARIABLE:default}: la variable de entorno gana.
+# La configuracion vive aqui, no en el codigo. ${VARIABLE:default}: la variable de entorno gana;
+# el default es para desarrollo local con el docker-compose del repo.
 server:
   port: ${SERVER_PORT:8084}
   error:
@@ -7,11 +8,28 @@ server:
 spring:
   application:
     name: sync-service
+  # ORIGEN: BD del monolito (copia local en Docker, puerto 3307). Usuario de SOLO LECTURA.
+  datasource:
+    url: ${DB_URL:jdbc:mariadb://localhost:3307/oficina_agua_db}
+    username: ${DB_USERNAME:sync_reader}
+    password: ${DB_PASSWORD:sync_reader_pw}
+    hikari:
+      read-only: true          # segunda barrera: las conexiones se abren en modo lectura
+      maximum-pool-size: 3
+
+# Configuracion propia del sync-service
+sync:
+  dynamodb:
+    endpoint: ${DYNAMODB_ENDPOINT:http://localhost:8000}   # vacio = DynamoDB real de AWS
+    region: ${AWS_REGION:us-east-2}
+    tabla: ${DYNAMODB_TABLE:resumen_cuentas}
+  # Pausa por registro SOLO para la demo (con pocos datos el job terminaria en milisegundos
+  # y no se veria el progreso). En produccion seria 0.
+  pausa-por-registro-ms: ${SYNC_PAUSA_MS:700}
 
 springdoc:
   swagger-ui:
-    # Swagger UI muestra NUESTRO contrato (el YAML), no uno inferido del codigo
-    url: /openapi/sync-api.yaml
+    url: /openapi/sync-api.yaml   # Swagger UI muestra NUESTRO contrato
 
 management:
   endpoints:
