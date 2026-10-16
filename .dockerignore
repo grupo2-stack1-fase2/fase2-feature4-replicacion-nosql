@@ -1,0 +1,5 @@
+# Solo se envia a Docker lo necesario para compilar: el pom y el codigo.
+# Asi nunca se cuela target/, .git, ni archivos con contrasenas.
+*
+!pom.xml
+!src

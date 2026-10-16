@@ -1,7 +1,11 @@
-# Entorno local de la Feature 4. Todo corre en contenedores:
-#   monolito-db    -> copia LOCAL de la BD de AQUORA (origen, el sync-service solo LEE)
-#   dynamodb-local -> destino NoSQL (DynamoDB que corre en tu computadora, sin AWS)
+# Entorno completo de la Feature 4. Todo corre en contenedores:
+#   monolito-db    -> copia LOCAL de la BD de AQUORA (origen; el sync-service solo LEE)
+#   dynamodb-local -> destino NoSQL (DynamoDB en tu computadora, sin AWS)
 #   dynamodb-admin -> pagina web para ver las tablas de DynamoDB (http://localhost:8001)
+#   sync-service   -> el microservicio (Swagger en http://localhost:8084/swagger-ui.html)
+#
+# Levantar todo:              docker compose up -d --build
+# Solo infraestructura (dev): docker compose up -d monolito-db dynamodb-local dynamodb-admin
 services:
   monolito-db:
     image: mariadb:11.4
@@ -35,7 +39,7 @@ services:
     image: aaronshaf/dynamodb-admin:latest
     container_name: sync-dynamodb-admin
     environment:
-      DYNAMO_ENDPOINT: http://dynamodb-local:8000   # dentro de la red de compose se usa el NOMBRE del servicio
+      DYNAMO_ENDPOINT: http://dynamodb-local:8000   # dentro de compose se usa el NOMBRE del servicio
       AWS_REGION: us-east-2
       AWS_ACCESS_KEY_ID: local
       AWS_SECRET_ACCESS_KEY: local
@@ -43,6 +47,28 @@ services:
       - "8001:8001"
     depends_on:
       - dynamodb-local
+
+  sync-service:
+    build: .                       # construye la imagen con el Dockerfile de este repo
+    image: sync-service:1.0.0
+    container_name: sync-service
+    environment:
+      SERVER_PORT: 8084
+      # Dentro de la red de compose: nombre del servicio + puerto INTERNO (3306, no 3307)
+      DB_URL: jdbc:mariadb://monolito-db:3306/oficina_agua_db
+      DB_USERNAME: sync_reader
+      DB_PASSWORD: sync_reader_pw
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      AWS_REGION: us-east-2
+      DYNAMODB_TABLE: resumen_cuentas
+      SYNC_PAUSA_MS: 700             # solo para que la demo se pueda observar
+    ports:
+      - "8084:8084"
+    depends_on:
+      monolito-db:
+        condition: service_healthy   # espera a que MariaDB este lista
+      dynamodb-local:
+        condition: service_started
 
 volumes:
   monolito-data:
