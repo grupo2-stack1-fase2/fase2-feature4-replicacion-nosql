@@ -1,5 +1,7 @@
 package gt.edu.umg.desarrolloweb.sync.service;
 
+import gt.edu.umg.desarrolloweb.sync.api.dto.AccionRegistroDto;
+import gt.edu.umg.desarrolloweb.sync.api.dto.ResultadoRegistroDto;
 import gt.edu.umg.desarrolloweb.sync.model.ResumenContador;
 import gt.edu.umg.desarrolloweb.sync.repository.ResumenDestinoRepository;
 import gt.edu.umg.desarrolloweb.sync.repository.ResumenOrigenRepository;
@@ -22,7 +24,8 @@ import org.springframework.stereotype.Component;
  *        - no existe       -> putItem  -> insertados++
  *        - huella distinta -> putItem  -> actualizados++
  *        - huella igual    -> no se escribe nada -> sinCambios++
- *   4. Actualizar el progreso despues de cada registro.
+ *   4. Actualizar el progreso y guardar el resultado de cada registro
+ *      (la pagina progreso.html los muestra en vivo).
  */
 @Component
 public class SyncJobRunner {
@@ -63,20 +66,25 @@ public class SyncJobRunner {
                 String huellaNueva = HuellaResumen.calcular(resumen);
                 Optional<String> huellaGuardada = destino.obtenerHuella(resumen.contadorId());
 
+                AccionRegistroDto accion;
                 if (huellaGuardada.isEmpty()) {
                     destino.guardar(resumen, huellaNueva, jobId);
                     insertados++;
+                    accion = AccionRegistroDto.INSERTADO;
                     log.info("Job {}: contador {} INSERTADO", jobId, resumen.numeroRegistro());
                 } else if (!huellaGuardada.get().equals(huellaNueva)) {
                     destino.guardar(resumen, huellaNueva, jobId);
                     actualizados++;
+                    accion = AccionRegistroDto.ACTUALIZADO;
                     log.info("Job {}: contador {} ACTUALIZADO", jobId, resumen.numeroRegistro());
                 } else {
                     sinCambios++;
+                    accion = AccionRegistroDto.SIN_CAMBIOS;
                 }
 
                 procesados++;
-                jobService.registrarAvance(jobId, procesados, insertados, actualizados, sinCambios);
+                jobService.registrarAvance(jobId, aResultado(procesados, resumen, accion),
+                        procesados, insertados, actualizados, sinCambios);
 
                 if (pausaPorRegistroMs > 0) {
                     Thread.sleep(pausaPorRegistroMs);   // solo para que la demo se pueda observar
@@ -95,5 +103,20 @@ public class SyncJobRunner {
             log.error("Job {} fallo", jobId, e);
             jobService.fallar(jobId, e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
+
+    /** Fila que vera la pagina de progreso: datos del contador + que hizo el diff. */
+    private static ResultadoRegistroDto aResultado(int orden, ResumenContador r,
+                                                   AccionRegistroDto accion) {
+        return new ResultadoRegistroDto()
+                .orden(orden)
+                .contadorId(r.contadorId())
+                .numeroRegistro(r.numeroRegistro())
+                .clienteNombre(r.clienteNombre())
+                .sector(r.sector())
+                .totalFacturado(r.totalFacturado())
+                .totalPagado(r.totalPagado())
+                .saldo(r.saldo())
+                .accion(accion);
     }
 }

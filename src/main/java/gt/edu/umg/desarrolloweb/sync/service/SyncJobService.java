@@ -1,11 +1,13 @@
 package gt.edu.umg.desarrolloweb.sync.service;
 
 import gt.edu.umg.desarrolloweb.sync.api.dto.EstadoJobDto;
+import gt.edu.umg.desarrolloweb.sync.api.dto.ResultadoRegistroDto;
 import gt.edu.umg.desarrolloweb.sync.api.dto.SyncJobDto;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import org.springframework.stereotype.Service;
 
@@ -23,7 +25,7 @@ public class SyncJobService {
      * synchronized: si llegan dos POST al mismo tiempo, entran de uno en uno.
      * Asi no se pueden colar dos jobs activos.
      */
-    public synchronized SyncJobDto crearJob() {
+    public synchronized SyncJobDto crearJob(String urlBase) {
         boolean hayJobActivo = jobs.values().stream()
                 .anyMatch(j -> j.getEstado() == EstadoJobDto.PENDIENTE
                             || j.getEstado() == EstadoJobDto.EN_PROGRESO);
@@ -31,8 +33,9 @@ public class SyncJobService {
             throw new JobEnCursoException();
         }
 
+        UUID jobId = UUID.randomUUID();
         SyncJobDto job = new SyncJobDto()
-                .jobId(UUID.randomUUID())
+                .jobId(jobId)
                 .estado(EstadoJobDto.PENDIENTE)
                 .progreso(0)
                 .totalRegistros(0)
@@ -40,8 +43,12 @@ public class SyncJobService {
                 .insertados(0)
                 .actualizados(0)
                 .sinCambios(0)
-                .creadoEn(OffsetDateTime.now());
-        jobs.put(job.getJobId(), job);
+                .creadoEn(OffsetDateTime.now())
+                .verEn(urlBase + "/progreso.html?jobId=" + jobId)
+                // CopyOnWriteArrayList: el hilo del job agrega resultados mientras el GET
+                // los convierte a JSON; con un ArrayList normal eso podria lanzar un error.
+                .resultados(new CopyOnWriteArrayList<>());
+        jobs.put(jobId, job);
         return job;
     }
 
@@ -62,9 +69,10 @@ public class SyncJobService {
                 .totalRegistros(totalRegistros));
     }
 
-    public void registrarAvance(UUID jobId, int procesados, int insertados,
-                                int actualizados, int sinCambios) {
+    public void registrarAvance(UUID jobId, ResultadoRegistroDto resultado, int procesados,
+                                int insertados, int actualizados, int sinCambios) {
         actualizar(jobId, job -> {
+            job.getResultados().add(resultado);   // la pagina web muestra esta fila de inmediato
             job.procesados(procesados)
                .insertados(insertados)
                .actualizados(actualizados)

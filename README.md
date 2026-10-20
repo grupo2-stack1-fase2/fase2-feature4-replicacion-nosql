@@ -71,11 +71,23 @@ Las interfaces y DTOs de Java se **generan** desde ese archivo con `openapi-gene
 | Método | Ruta | Respuestas | Descripción |
 |---|---|---|---|
 | `POST` | `/api/sync/resumen` | **202** · 409 · 500 | Inicia una replicación. Responde de inmediato con `jobId` y el header `Location`. **409** si ya hay una replicación `PENDIENTE` o `EN_PROGRESO`. |
-| `GET` | `/api/sync/jobs/{jobId}` | **200** · 400 · 404 · 500 | Estado y progreso del job. **400** si el `jobId` no es un UUID; **404** si no existe. |
+| `GET` | `/api/sync/jobs/{jobId}` | **200** · 400 · 404 · 500 | Estado, progreso y **resultados** del job. **400** si el `jobId` no es un UUID; **404** si no existe. |
+| `GET` | `/progreso.html?jobId={jobId}` | página web | **Visualización en vivo**: barra de progreso y tabla con el resultado de cada contador mientras se procesa. Su URL completa viene en el campo `verEn`. |
 
 **Estados del job:** `PENDIENTE` → `EN_PROGRESO` → `COMPLETADO` | `FALLIDO`
 
-**Ejemplo de respuesta del `GET`:**
+**Ejemplo de respuesta del `POST` (202):**
+
+```json
+{
+  "jobId": "9ff90a03-5b4c-439b-8638-39380a9c042e",
+  "estado": "PENDIENTE",
+  "consultarEn": "/api/sync/jobs/9ff90a03-5b4c-439b-8638-39380a9c042e",
+  "verEn": "http://localhost:8084/progreso.html?jobId=9ff90a03-5b4c-439b-8638-39380a9c042e"
+}
+```
+
+**Ejemplo de respuesta del `GET`** (`resultados` recortado a 2 de 9 filas):
 
 ```json
 {
@@ -90,9 +102,19 @@ Las interfaces y DTOs de Java se **generan** desde ese archivo con `openapi-gene
   "mensaje": null,
   "creadoEn": "2026-10-15T20:03:10.10-06:00",
   "iniciadoEn": "2026-10-15T20:03:10.12-06:00",
-  "finalizadoEn": "2026-10-15T20:03:16.90-06:00"
+  "finalizadoEn": "2026-10-15T20:03:16.90-06:00",
+  "verEn": "http://localhost:8084/progreso.html?jobId=9ff90a03-5b4c-439b-8638-39380a9c042e",
+  "resultados": [
+    { "orden": 1, "contadorId": 1, "numeroRegistro": "CNT-0001", "clienteNombre": "…", "sector": "…",
+      "totalFacturado": 125.00, "totalPagado": 125.00, "saldo": 0.00, "accion": "ACTUALIZADO" },
+    { "orden": 2, "contadorId": 2, "numeroRegistro": "CNT-0002", "clienteNombre": "…", "sector": "…",
+      "totalFacturado": 90.00, "totalPagado": 50.00, "saldo": 40.00, "accion": "SIN_CAMBIOS" }
+  ]
 }
 ```
+
+`accion` indica qué hizo el diff con cada contador: `INSERTADO` (no existía en DynamoDB),
+`ACTUALIZADO` (existía pero cambió) o `SIN_CAMBIOS` (igual al destino; no se escribió).
 
 Errores con el mismo formato en todos los casos (schema `Error`):
 
@@ -100,6 +122,7 @@ Errores con el mismo formato en todos los casos (schema `Error`):
 { "status": 409, "message": "Ya hay una replicacion en curso; espere a que termine", "details": [] }
 ```
 
+- **Página de progreso (iniciar y ver en vivo):** http://localhost:8084/progreso.html
 - **Swagger UI:** http://localhost:8084/swagger-ui.html
 - **Salud:** http://localhost:8084/actuator/health
 
@@ -163,6 +186,16 @@ docker compose down -v         # BORRA todo (BD y DynamoDB) para empezar de cero
 ---
 
 ## Cómo probarlo (demo del diff)
+
+### Opción visual: la página de progreso
+
+1. Abre **http://localhost:8084/progreso.html** y presiona **Iniciar replicación**
+   (o ejecuta el `POST` en Swagger y abre la URL del campo `verEn`).
+2. La página consulta `GET /api/sync/jobs/{jobId}` **cada segundo** y muestra:
+   - la **barra de progreso** (0–100 %) y el estado del job,
+   - los totales: insertados, actualizados y sin cambios,
+   - la **tabla de resultados**, que se llena fila por fila mientras el job avanza.
+3. Cuando el job termina deja de consultar y se habilita **Nueva replicación**.
 
 ### Comando de prueba (una sola línea, Git Bash)
 
@@ -234,8 +267,17 @@ POST /api/sync/resumen
   │
   ├─ SyncJobService.crearJob()        → registra el job (PENDIENTE); 409 si ya hay uno activo
   ├─ SyncJobRunner.ejecutar(jobId)    → @Async: se entrega al hilo "sync-job-1" y regresa YA
-  └─ 202 Accepted + Location          → el cliente recibe el jobId sin esperar
+  └─ 202 Accepted + Location + verEn  → el cliente recibe el jobId y la URL de la página
 ```
+
+Relación con el diagrama de la feature:
+
+| Caja del diagrama | En el código |
+|---|---|
+| **Generate** (punto de partida, Swagger) | `POST /api/sync/resumen` → `SyncController.iniciarReplicacionResumen()` |
+| **GenerarJob** | `SyncJobService.crearJob()` |
+| **Thread** → **Amazon DynamoDB** | `SyncJobRunner.ejecutar()` (`@Async`, hilo `sync-job-1`) → `ResumenDestinoRepository.guardar()` |
+| **GetJob** / *Response Job* | `GET /api/sync/jobs/{jobId}` (JSON) y su visualización `progreso.html` |
 
 `SyncJobRunner` es una clase aparte porque `@Async` solo funciona cuando el método se llama
 desde **otro** bean.
@@ -314,6 +356,8 @@ Tabla `resumen_cuentas`, clave primaria `contadorId` (número). Un item por cont
 | **Un documento por contador** | Es la unidad que consulta el cliente (estado de cuenta por contador). *Pendiente de confirmar con el equipo.* |
 | **`JdbcTemplate` en vez de entidades JPA** | Solo se necesita **leer** el resultado de una consulta agregada de 4 tablas; no se crean, editan ni borran registros. |
 | **Jobs en memoria** (`ConcurrentHashMap`) | Suficiente para la fase local. Si el servicio se reinicia, el historial de jobs se pierde, pero los datos ya replicados quedan en DynamoDB. |
+| **Página con *polling* cada segundo** (en vez de WebSockets/SSE) | Es lo más simple de entender y depurar: la página usa el mismo `GET` que cualquier cliente. Con un job de segundos o minutos, 1 consulta por segundo no carga al servicio. |
+| **Resultados guardados en el job** (`CopyOnWriteArrayList`) | El hilo del job agrega filas mientras el `GET` las convierte a JSON; esta lista permite leer y escribir a la vez sin errores. |
 | **Un solo hilo** + **409** | Evita dos replicaciones escribiendo al mismo tiempo en DynamoDB. |
 | **`jobId` como UUID** | No se puede adivinar ni se repite. |
 | **Puerto 8084** | Para no chocar con los otros microservicios del equipo. |
@@ -357,7 +401,9 @@ fase2-feature4-replicacion-nosql/
 └── src/main/
     ├── resources/
     │   ├── application.yml
-    │   └── static/openapi/sync-api.yaml   # ⭐ EL CONTRATO
+    │   └── static/
+    │       ├── openapi/sync-api.yaml      # ⭐ EL CONTRATO
+    │       └── progreso.html              # página de progreso en vivo (HTML + JS, sin librerías)
     └── java/gt/edu/umg/desarrolloweb/sync/
         ├── SyncServiceApplication.java
         ├── config/       AsyncConfig, DynamoDbConfig

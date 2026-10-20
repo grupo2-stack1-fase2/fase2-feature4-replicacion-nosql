@@ -7,6 +7,9 @@ info:
     (DynamoDB Local). El cliente pide una replicacion y recibe un jobId de inmediato
     (202 Accepted); el trabajo corre en segundo plano y su avance se consulta con el jobId.
     Solo se replican las diferencias (diff + upsert) y nunca se borran registros del destino.
+
+    Ademas del JSON, cada job tiene una pagina web (campo `verEn`) que muestra en vivo
+    la barra de progreso y los resultados de cada contador mientras se van procesando.
 servers:
   - url: /
     description: Mismo host (local, Docker o AWS)
@@ -80,7 +83,7 @@ components:
 
     SyncJobAceptado:
       type: object
-      required: [jobId, estado, consultarEn]
+      required: [jobId, estado, consultarEn, verEn]
       properties:
         jobId:
           type: string
@@ -90,8 +93,12 @@ components:
           $ref: '#/components/schemas/EstadoJob'
         consultarEn:
           type: string
-          description: Ruta para consultar el progreso
+          description: Ruta para consultar el progreso (JSON)
           example: /api/sync/jobs/3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+        verEn:
+          type: string
+          description: URL de la pagina web que muestra el progreso y los resultados en vivo
+          example: http://localhost:8084/progreso.html?jobId=3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
 
     SyncJob:
       type: object
@@ -153,6 +160,56 @@ components:
           type: string
           format: date-time
           nullable: true
+        verEn:
+          type: string
+          description: URL de la pagina web que muestra el progreso y los resultados en vivo
+          example: http://localhost:8084/progreso.html?jobId=3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+        resultados:
+          type: array
+          description: Resultado de cada contador ya procesado, en el orden en que se proceso
+          items:
+            $ref: '#/components/schemas/ResultadoRegistro'
+
+    AccionRegistro:
+      type: string
+      description: |
+        Que hizo el diff con el registro: INSERTADO (no existia en NoSQL),
+        ACTUALIZADO (existia pero cambio) o SIN_CAMBIOS (igual al destino, no se escribio).
+      enum: [INSERTADO, ACTUALIZADO, SIN_CAMBIOS]
+
+    ResultadoRegistro:
+      type: object
+      required: [orden, contadorId, numeroRegistro, accion]
+      properties:
+        orden:
+          type: integer
+          format: int32
+          description: Posicion del registro dentro del job (1, 2, 3...)
+          example: 1
+        contadorId:
+          type: integer
+          format: int64
+          example: 1
+        numeroRegistro:
+          type: string
+          example: CNT-0001
+        clienteNombre:
+          type: string
+          example: Juan Perez
+        sector:
+          type: string
+          example: Zona 1
+        totalFacturado:
+          type: number
+          example: 125.00
+        totalPagado:
+          type: number
+          example: 100.00
+        saldo:
+          type: number
+          example: 25.00
+        accion:
+          $ref: '#/components/schemas/AccionRegistro'
 
     Error:
       type: object

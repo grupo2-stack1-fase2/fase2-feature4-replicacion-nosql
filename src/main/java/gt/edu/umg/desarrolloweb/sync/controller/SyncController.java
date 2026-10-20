@@ -9,6 +9,7 @@ import java.net.URI;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 /**
  * Capa REST. Implementa la interfaz GENERADA desde sync-api.yaml.
@@ -28,14 +29,18 @@ public class SyncController implements SyncApi {
     @Override
     public ResponseEntity<SyncJobAceptadoDto> iniciarReplicacionResumen() {
         // 1. Registrar el job (PENDIENTE). Si ya hay uno activo, lanza 409.
-        SyncJobDto job = syncJobService.crearJob();
+        //    urlBase = "http://localhost:8084" (o el host que sea): sirve para armar la
+        //    URL completa de la pagina de progreso, que se puede abrir con un clic.
+        String urlBase = ServletUriComponentsBuilder.fromCurrentContextPath().toUriString();
+        SyncJobDto job = syncJobService.crearJob(urlBase);
         String url = "/api/sync/jobs/" + job.getJobId();
 
         // 2. Armar la respuesta ANTES de lanzar el hilo (asi el estado sale PENDIENTE)
         SyncJobAceptadoDto body = new SyncJobAceptadoDto()
                 .jobId(job.getJobId())
                 .estado(job.getEstado())
-                .consultarEn(url);
+                .consultarEn(url)
+                .verEn(job.getVerEn());
 
         // 3. Lanzar el trabajo en segundo plano: esta llamada regresa de inmediato
         syncJobRunner.ejecutar(job.getJobId());
