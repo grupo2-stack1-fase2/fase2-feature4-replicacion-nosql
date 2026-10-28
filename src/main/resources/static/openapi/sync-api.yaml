@@ -1,0 +1,254 @@
+openapi: 3.0.3
+info:
+  title: API de replicacion - Oficina del Agua
+  version: 1.0.0
+  description: |
+    Feature 4 (Fase 2): replicacion asincrona del resumen de cuentas hacia una base NoSQL
+    (DynamoDB Local). El cliente pide una replicacion y recibe un jobId de inmediato
+    (202 Accepted); el trabajo corre en segundo plano y su avance se consulta con el jobId.
+    Solo se replican las diferencias (diff + upsert) y nunca se borran registros del destino.
+
+    Ademas del JSON, cada job tiene una pagina web (campo `verEn`) que muestra en vivo
+    la barra de progreso y los resultados de cada contador mientras se van procesando.
+servers:
+  - url: /
+    description: Mismo host (local, Docker o AWS)
+  - url: http://localhost:8084
+    description: Local
+tags:
+  - name: Sync
+    description: Replicacion asincrona a NoSQL
+
+paths:
+  /api/sync/resumen:
+    post:
+      tags: [Sync]
+      operationId: iniciarReplicacionResumen
+      summary: Inicia una replicacion del resumen de cuentas
+      description: |
+        Crea un job de replicacion y responde de inmediato con su jobId. El job compara
+        el resumen de cada contador del monolito contra lo que ya existe en NoSQL y aplica
+        solo upserts de lo que cambio. Si ya hay un job PENDIENTE o EN_PROGRESO responde 409.
+      responses:
+        '202':
+          description: Job aceptado; se ejecuta en segundo plano
+          headers:
+            Location:
+              description: URL para consultar el estado del job
+              schema:
+                type: string
+                example: /api/sync/jobs/3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncJobAceptado'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/sync/jobs/{jobId}:
+    get:
+      tags: [Sync]
+      operationId: obtenerEstadoJob
+      summary: Consulta el estado y el progreso de un job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          description: Identificador devuelto por POST /api/sync/resumen
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Estado actual del job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  schemas:
+    EstadoJob:
+      type: string
+      description: Ciclo de vida del job
+      enum: [PENDIENTE, EN_PROGRESO, COMPLETADO, FALLIDO]
+
+    SyncJobAceptado:
+      type: object
+      required: [jobId, estado, consultarEn, verEn]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+          example: 3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+        estado:
+          $ref: '#/components/schemas/EstadoJob'
+        consultarEn:
+          type: string
+          description: Ruta para consultar el progreso (JSON)
+          example: /api/sync/jobs/3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+        verEn:
+          type: string
+          description: URL de la pagina web que muestra el progreso y los resultados en vivo
+          example: http://localhost:8084/progreso.html?jobId=3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+
+    SyncJob:
+      type: object
+      required: [jobId, estado, progreso, creadoEn]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        estado:
+          $ref: '#/components/schemas/EstadoJob'
+        progreso:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+          description: Porcentaje de avance (0-100)
+          example: 45
+        totalRegistros:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Cantidad de resumenes (contadores) a evaluar
+          example: 120
+        procesados:
+          type: integer
+          format: int32
+          minimum: 0
+          example: 54
+        insertados:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Registros nuevos escritos en NoSQL
+          example: 3
+        actualizados:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Registros existentes que cambiaron y se actualizaron
+          example: 5
+        sinCambios:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Registros iguales al destino; no se escribieron (diff)
+          example: 46
+        mensaje:
+          type: string
+          nullable: true
+          description: Detalle del error si el estado es FALLIDO
+        creadoEn:
+          type: string
+          format: date-time
+        iniciadoEn:
+          type: string
+          format: date-time
+          nullable: true
+        finalizadoEn:
+          type: string
+          format: date-time
+          nullable: true
+        verEn:
+          type: string
+          description: URL de la pagina web que muestra el progreso y los resultados en vivo
+          example: http://localhost:8084/progreso.html?jobId=3f2b8c1e-9a4d-4e7b-8c21-5d6f0a1b2c3d
+        resultados:
+          type: array
+          description: Resultado de cada contador ya procesado, en el orden en que se proceso
+          items:
+            $ref: '#/components/schemas/ResultadoRegistro'
+
+    AccionRegistro:
+      type: string
+      description: |
+        Que hizo el diff con el registro: INSERTADO (no existia en NoSQL),
+        ACTUALIZADO (existia pero cambio) o SIN_CAMBIOS (igual al destino, no se escribio).
+      enum: [INSERTADO, ACTUALIZADO, SIN_CAMBIOS]
+
+    ResultadoRegistro:
+      type: object
+      required: [orden, contadorId, numeroRegistro, accion]
+      properties:
+        orden:
+          type: integer
+          format: int32
+          description: Posicion del registro dentro del job (1, 2, 3...)
+          example: 1
+        contadorId:
+          type: integer
+          format: int64
+          example: 1
+        numeroRegistro:
+          type: string
+          example: CNT-0001
+        clienteNombre:
+          type: string
+          example: Juan Perez
+        sector:
+          type: string
+          example: Zona 1
+        totalFacturado:
+          type: number
+          example: 125.00
+        totalPagado:
+          type: number
+          example: 100.00
+        saldo:
+          type: number
+          example: 25.00
+        accion:
+          $ref: '#/components/schemas/AccionRegistro'
+
+    Error:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: integer
+          format: int32
+          example: 404
+        message:
+          type: string
+          example: No existe un job con ese id
+        details:
+          type: array
+          items:
+            type: string
+
+  responses:
+    BadRequest:
+      description: Parametro invalido (por ejemplo, jobId que no es un UUID)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No existe un job con ese id
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Ya hay una replicacion en curso
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Error inesperado (el detalle solo va al log)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

@@ -1,0 +1,75 @@
+# Entorno completo de la Feature 4. Todo corre en contenedores:
+#   monolito-db    -> copia LOCAL de la BD de AQUORA (origen; el sync-service solo LEE)
+#   dynamodb-local -> destino NoSQL (DynamoDB en tu computadora, sin AWS)
+#   dynamodb-admin -> pagina web para ver las tablas de DynamoDB (http://localhost:8001)
+#   sync-service   -> el microservicio (Swagger en http://localhost:8084/swagger-ui.html)
+#
+# Levantar todo:              docker compose up -d --build
+# Solo infraestructura (dev): docker compose up -d monolito-db dynamodb-local dynamodb-admin
+services:
+  monolito-db:
+    image: mariadb:11.4
+    container_name: sync-monolito-db
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: oficina_agua_db
+    ports:
+      - "3307:3306"        # 3307 en tu PC para NO chocar con Laragon (3306)
+    volumes:
+      - monolito-data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro   # esquema + datos + usuario de solo lectura
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: sync-dynamodb
+    user: root             # evita error de permisos al escribir en el volumen
+    working_dir: /home/dynamodblocal
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data"
+    ports:
+      - "8000:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data      # los datos sobreviven a reinicios
+
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:latest
+    container_name: sync-dynamodb-admin
+    environment:
+      DYNAMO_ENDPOINT: http://dynamodb-local:8000   # dentro de compose se usa el NOMBRE del servicio
+      AWS_REGION: us-east-2
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    ports:
+      - "8001:8001"
+    depends_on:
+      - dynamodb-local
+
+  sync-service:
+    build: .                       # construye la imagen con el Dockerfile de este repo
+    image: sync-service:1.0.0
+    container_name: sync-service
+    environment:
+      SERVER_PORT: 8084
+      # Dentro de la red de compose: nombre del servicio + puerto INTERNO (3306, no 3307)
+      DB_URL: jdbc:mariadb://monolito-db:3306/oficina_agua_db
+      DB_USERNAME: sync_reader
+      DB_PASSWORD: sync_reader_pw
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      AWS_REGION: us-east-2
+      DYNAMODB_TABLE: resumen_cuentas
+      SYNC_PAUSA_MS: 700             # solo para que la demo se pueda observar
+    ports:
+      - "8084:8084"
+    depends_on:
+      monolito-db:
+        condition: service_healthy   # espera a que MariaDB este lista
+      dynamodb-local:
+        condition: service_started
+
+volumes:
+  monolito-data:
+  dynamodb-data:

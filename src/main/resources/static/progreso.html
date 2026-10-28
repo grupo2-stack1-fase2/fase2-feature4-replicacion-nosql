@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Progreso de replicación</title>
+  <!--
+    Pagina de progreso del job (Feature 4).
+    No usa librerias externas: HTML + CSS + JavaScript puro.
+    Funciona asi:
+      1. Lee el jobId de la URL  (progreso.html?jobId=...)
+      2. Cada segundo consulta   GET /api/sync/jobs/{jobId}   (el mismo endpoint "GetJob")
+      3. Dibuja la barra de progreso, los contadores y agrega las filas nuevas a la tabla
+      4. Cuando el job termina (COMPLETADO o FALLIDO) deja de consultar
+    Si se abre sin jobId, muestra un boton para iniciar una replicacion (POST /api/sync/resumen).
+  -->
+  <style>
+    :root {
+      --azul: #0b63ce;
+      --azul-claro: #e8f1fc;
+      --verde: #1a7f37;
+      --verde-claro: #e6f4ea;
+      --ambar: #9a6700;
+      --ambar-claro: #fff4d6;
+      --gris: #57606a;
+      --gris-claro: #f3f4f6;
+      --rojo: #c62828;
+      --rojo-claro: #fdecea;
+      --borde: #d8dee4;
+      --texto: #1f2328;
+      --fondo: #f6f8fa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--fondo);
+      color: var(--texto);
+    }
+    header {
+      background: var(--azul);
+      color: #fff;
+      padding: 18px 24px;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
+    header p  { margin: 4px 0 0; opacity: .85; font-size: .9rem; }
+    main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    .tarjeta {
+      background: #fff;
+      border: 1px solid var(--borde);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .fila-estado { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    .job-id { font-family: ui-monospace, Consolas, monospace; font-size: .85rem; color: var(--gris); word-break: break-all; }
+    .insignia {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: .8rem;
+      font-weight: 600;
+      letter-spacing: .02em;
+    }
+    .PENDIENTE   { background: var(--gris-claro);  color: var(--gris); }
+    .EN_PROGRESO { background: var(--azul-claro);  color: var(--azul); }
+    .COMPLETADO  { background: var(--verde-claro); color: var(--verde); }
+    .FALLIDO     { background: var(--rojo-claro);  color: var(--rojo); }
+    .INSERTADO   { background: var(--verde-claro); color: var(--verde); }
+    .ACTUALIZADO { background: var(--ambar-claro); color: var(--ambar); }
+    .SIN_CAMBIOS { background: var(--gris-claro);  color: var(--gris); }
+
+    .barra { height: 22px; background: var(--gris-claro); border-radius: 999px; overflow: hidden; margin-top: 16px; }
+    .barra-relleno {
+      height: 100%;
+      width: 0%;
+      background: var(--azul);
+      transition: width .5s ease;
+      color: #fff;
+      font-size: .75rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 8px;
+      min-width: 36px;
+    }
+    .barra-relleno.listo  { background: var(--verde); }
+    .barra-relleno.fallo  { background: var(--rojo); }
+    .barra-relleno.activo {
+      background-image: linear-gradient(45deg, rgba(255,255,255,.18) 25%, transparent 25%, transparent 50%,
+                        rgba(255,255,255,.18) 50%, rgba(255,255,255,.18) 75%, transparent 75%, transparent);
+      background-size: 28px 28px;
+      animation: rayas 1s linear infinite;
+    }
+    @keyframes rayas { from { background-position: 28px 0; } to { background-position: 0 0; } }
+    .texto-avance { margin-top: 8px; color: var(--gris); font-size: .9rem; }
+
+    .numeros { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .numero { background: #fff; border: 1px solid var(--borde); border-radius: 10px; padding: 14px 16px; }
+    .numero .valor { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .numero .etiqueta { font-size: .8rem; color: var(--gris); margin-top: 2px; }
+    .numero.ins .valor { color: var(--verde); }
+    .numero.act .valor { color: var(--ambar); }
+    .numero.sin .valor { color: var(--gris); }
+
+    h2 { font-size: 1rem; margin: 0 0 12px; }
+    .tabla-contenedor { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--borde); white-space: nowrap; }
+    th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--gris); background: var(--gris-claro); }
+    td.dinero, th.dinero { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.nueva { animation: resaltar 1.6s ease; }
+    @keyframes resaltar { from { background: #fff8c5; } to { background: transparent; } }
+    .vacio { color: var(--gris); text-align: center; padding: 24px; }
+
+    .acciones { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+    .boton, a.boton {
+      display: inline-block;
+      border: 1px solid var(--borde);
+      background: #fff;
+      color: var(--texto);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: .9rem;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .boton.principal { background: var(--azul); color: #fff; border-color: var(--azul); }
+    .boton:disabled { opacity: .6; cursor: default; }
+    .aviso { padding: 12px 14px; border-radius: 8px; margin-top: 12px; }
+    .aviso.error { background: var(--rojo-claro); color: var(--rojo); }
+    .aviso.info  { background: var(--azul-claro); color: var(--azul); }
+    .tiempos { font-size: .85rem; color: var(--gris); margin-top: 10px; }
+    .oculto { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Replicación asíncrona a NoSQL</h1>
+  <p>Oficina del Agua · Resumen de cuenta por contador → Amazon DynamoDB</p>
+</header>
+
+<main>
+
+  <!-- Vista 1: sin jobId en la URL -> boton para iniciar una replicacion -->
+  <section id="vista-inicio" class="tarjeta oculto">
+    <h2>Iniciar una replicación</h2>
+    <p>Se leerá el resumen de cada contador del monolito y solo se copiarán a DynamoDB los que cambiaron.</p>
+    <div class="acciones">
+      <button id="btn-iniciar" class="boton principal">Iniciar replicación</button>
+      <a class="boton" href="/swagger-ui.html">Abrir Swagger</a>
+    </div>
+    <div id="aviso-inicio"></div>
+  </section>
+
+  <!-- Vista 2: con jobId -> progreso y resultados en vivo -->
+  <section id="vista-job" class="oculto">
+
+    <div class="tarjeta">
+      <div class="fila-estado">
+        <div>
+          <strong>Job</strong>
+          <div class="job-id" id="job-id"></div>
+        </div>
+        <span id="estado" class="insignia PENDIENTE">PENDIENTE</span>
+      </div>
+
+      <div class="barra"><div id="barra" class="barra-relleno activo">0%</div></div>
+      <div class="texto-avance" id="texto-avance">Esperando que el job inicie…</div>
+      <div class="tiempos" id="tiempos"></div>
+      <div id="aviso-job"></div>
+    </div>
+
+    <div class="numeros" style="margin-bottom:16px">
+      <div class="numero"><div class="valor" id="n-total">0</div><div class="etiqueta">Contadores a evaluar</div></div>
+      <div class="numero"><div class="valor" id="n-procesados">0</div><div class="etiqueta">Procesados</div></div>
+      <div class="numero ins"><div class="valor" id="n-insertados">0</div><div class="etiqueta">Insertados (nuevos)</div></div>
+      <div class="numero act"><div class="valor" id="n-actualizados">0</div><div class="etiqueta">Actualizados (cambiaron)</div></div>
+      <div class="numero sin"><div class="valor" id="n-sincambios">0</div><div class="etiqueta">Sin cambios (no se escribieron)</div></div>
+    </div>
+
+    <div class="tarjeta">
+      <h2>Resultados de la consulta</h2>
+      <div class="tabla-contenedor">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Contador</th>
+              <th>Cliente</th>
+              <th>Sector</th>
+              <th class="dinero">Facturado</th>
+              <th class="dinero">Pagado</th>
+              <th class="dinero">Saldo</th>
+              <th>Resultado</th>
+            </tr>
+          </thead>
+          <tbody id="filas">
+            <tr id="fila-vacia"><td colspan="8" class="vacio">Todavía no se ha procesado ningún contador…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="acciones">
+      <button id="btn-nuevo" class="boton principal" disabled>Nueva replicación</button>
+      <a class="boton" id="link-json" target="_blank">Ver respuesta JSON (GetJob)</a>
+      <a class="boton" href="/swagger-ui.html">Abrir Swagger</a>
+    </div>
+  </section>
+
+</main>
+
+<script>
+  const INTERVALO_MS = 1000;   // cada cuanto se consulta el progreso
+  const dinero = new Intl.NumberFormat('es-GT', { style: 'currency', currency: 'GTQ' });
+  const fecha  = new Intl.DateTimeFormat('es-GT', { dateStyle: 'short', timeStyle: 'medium' });
+
+  const jobId = new URLSearchParams(location.search).get('jobId');
+  let filasDibujadas = 0;      // cuantas filas ya estan en la tabla (solo se agregan las nuevas)
+  let temporizador = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---------- Vista 1: iniciar ----------
+  async function iniciarReplicacion() {
+    $('btn-iniciar').disabled = true;
+    $('btn-nuevo').disabled = true;
+    try {
+      const resp = await fetch('/api/sync/resumen', { method: 'POST' });
+      const datos = await resp.json();
+      if (resp.status === 202) {
+        location.href = datos.verEn;          // ir a la pagina de progreso del job nuevo
+        return;
+      }
+      mostrarAviso(jobId ? 'aviso-job' : 'aviso-inicio', 'error', datos.message || ('Error ' + resp.status));
+    } catch (e) {
+      mostrarAviso(jobId ? 'aviso-job' : 'aviso-inicio', 'error', 'No se pudo conectar con el servicio.');
+    }
+    $('btn-iniciar').disabled = false;
+    $('btn-nuevo').disabled = false;
+  }
+
+  // ---------- Vista 2: progreso ----------
+  async function consultar() {
+    try {
+      const resp = await fetch('/api/sync/jobs/' + encodeURIComponent(jobId));
+      const datos = await resp.json();
+      if (!resp.ok) {                          // 400 (id invalido) o 404 (no existe)
+        detener();
+        mostrarAviso('aviso-job', 'error', datos.message || ('Error ' + resp.status));
+        $('texto-avance').textContent = '';
+        $('btn-nuevo').disabled = false;
+        return;
+      }
+      $('aviso-job').innerHTML = '';          // borra avisos viejos (por ejemplo, de conexion)
+      dibujar(datos);
+      if (datos.estado === 'COMPLETADO' || datos.estado === 'FALLIDO') {
+        detener();
+      }
+    } catch (e) {
+      mostrarAviso('aviso-job', 'error', 'Se perdió la conexión con el servicio; reintentando…');
+    }
+  }
+
+  function dibujar(job) {
+    // Estado
+    const estado = $('estado');
+    estado.textContent = job.estado.replace('_', ' ');
+    estado.className = 'insignia ' + job.estado;
+
+    // Barra
+    const barra = $('barra');
+    barra.style.width = job.progreso + '%';
+    barra.textContent = job.progreso + '%';
+    barra.className = 'barra-relleno'
+      + (job.estado === 'COMPLETADO' ? ' listo' : '')
+      + (job.estado === 'FALLIDO' ? ' fallo' : '')
+      + (job.estado === 'PENDIENTE' || job.estado === 'EN_PROGRESO' ? ' activo' : '');
+
+    // Texto de avance
+    const textos = {
+      PENDIENTE:   'Esperando que el job inicie…',
+      EN_PROGRESO: `Procesando ${job.procesados ?? 0} de ${job.totalRegistros ?? 0} contadores…`,
+      COMPLETADO:  `Listo: ${job.procesados ?? 0} contadores evaluados. Solo se escribieron en DynamoDB los que cambiaron.`,
+      FALLIDO:     'El job falló.'
+    };
+    $('texto-avance').textContent = textos[job.estado] || '';
+
+    // Tiempos
+    const partes = ['Creado: ' + formatoFecha(job.creadoEn)];
+    if (job.iniciadoEn)   partes.push('Iniciado: ' + formatoFecha(job.iniciadoEn));
+    if (job.finalizadoEn) partes.push('Finalizado: ' + formatoFecha(job.finalizadoEn));
+    if (job.iniciadoEn && job.finalizadoEn) {
+      const seg = (new Date(job.finalizadoEn) - new Date(job.iniciadoEn)) / 1000;
+      partes.push('Duración: ' + seg.toFixed(1) + ' s');
+    }
+    $('tiempos').textContent = partes.join('  ·  ');
+
+    if (job.estado === 'FALLIDO') {
+      mostrarAviso('aviso-job', 'error', job.mensaje || 'Error desconocido');
+    }
+
+    // Numeros
+    $('n-total').textContent       = job.totalRegistros ?? 0;
+    $('n-procesados').textContent  = job.procesados ?? 0;
+    $('n-insertados').textContent  = job.insertados ?? 0;
+    $('n-actualizados').textContent = job.actualizados ?? 0;
+    $('n-sincambios').textContent  = job.sinCambios ?? 0;
+
+    // Tabla: solo se agregan las filas que todavia no estan dibujadas
+    const resultados = job.resultados || [];
+    if (resultados.length > 0 && $('fila-vacia')) $('fila-vacia').remove();
+    for (let i = filasDibujadas; i < resultados.length; i++) {
+      $('filas').appendChild(crearFila(resultados[i]));
+    }
+    filasDibujadas = resultados.length;
+  }
+
+  function crearFila(r) {
+    const tr = document.createElement('tr');
+    tr.className = 'nueva';
+    const celdas = [
+      [r.orden, ''],
+      [r.numeroRegistro, ''],
+      [r.clienteNombre ?? '—', ''],
+      [r.sector ?? '—', ''],
+      [formatoDinero(r.totalFacturado), 'dinero'],
+      [formatoDinero(r.totalPagado), 'dinero'],
+      [formatoDinero(r.saldo), 'dinero']
+    ];
+    for (const [texto, clase] of celdas) {
+      const td = document.createElement('td');
+      td.textContent = texto;               // textContent: el texto nunca se interpreta como HTML
+      if (clase) td.className = clase;
+      tr.appendChild(td);
+    }
+    const tdAccion = document.createElement('td');
+    const insignia = document.createElement('span');
+    insignia.className = 'insignia ' + r.accion;
+    insignia.textContent = r.accion.replace('_', ' ');
+    tdAccion.appendChild(insignia);
+    tr.appendChild(tdAccion);
+    return tr;
+  }
+
+  function detener() {
+    clearInterval(temporizador);
+    temporizador = null;
+    $('btn-nuevo').disabled = false;
+  }
+
+  function mostrarAviso(id, tipo, texto) {
+    $(id).innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'aviso ' + tipo;
+    div.textContent = texto;
+    $(id).appendChild(div);
+  }
+
+  const formatoDinero = (v) => (v === null || v === undefined) ? '—' : dinero.format(v);
+  const formatoFecha  = (v) => v ? fecha.format(new Date(v)) : '—';
+
+  // ---------- Arranque ----------
+  $('btn-iniciar').addEventListener('click', iniciarReplicacion);
+  $('btn-nuevo').addEventListener('click', iniciarReplicacion);
+
+  if (!jobId) {
+    $('vista-inicio').classList.remove('oculto');
+  } else {
+    $('vista-job').classList.remove('oculto');
+    $('job-id').textContent = jobId;
+    $('link-json').href = '/api/sync/jobs/' + encodeURIComponent(jobId);
+    consultar();
+    temporizador = setInterval(consultar, INTERVALO_MS);
+  }
+</script>
+</body>
+</html>
