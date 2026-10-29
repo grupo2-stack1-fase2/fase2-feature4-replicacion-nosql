@@ -1,7 +1,16 @@
+Nombre: Blanky Marisol López Marroquín
+
+Carnet: 0905-23-5227
+
+Repositorio: https://github.com/grupo2-stack1-fase2/fase2-feature4-replicacion-nosql
+
+Modulo asignado: Replicación asíncrona a NoSQL | SQL
+
+---
+
 # Feature 4 — Replicación asíncrona a NoSQL (`sync-service`)
 
 **Oficina del Agua · Fase 2 · Grupo 2 — Stack 1**
-Responsable: **Blanky Marisol López Marroquín**
 
 Microservicio **Spring Boot 3.5 + Java 17** que replica, de forma **asíncrona**, el
 **resumen de cuenta de cada contador** desde la base de datos del monolito AQUORA
@@ -17,23 +26,187 @@ Microservicio **Spring Boot 3.5 + Java 17** que replica, de forma **asíncrona**
 
 ## Tabla de contenido
 
-1. [Arquitectura](#arquitectura)
-2. [Endpoints](#endpoints)
-3. [Tecnologías](#tecnologías)
-4. [Requisitos](#requisitos)
-5. [Cómo levantarlo](#cómo-levantarlo)
-6. [Cómo probarlo (demo del diff)](#cómo-probarlo-demo-del-diff)
-7. [Cómo funciona por dentro](#cómo-funciona-por-dentro)
-8. [Seguridad](#seguridad)
-9. [Decisiones de diseño](#decisiones-de-diseño)
-10. [Configuración (variables de entorno)](#configuración-variables-de-entorno)
-11. [Estructura del proyecto](#estructura-del-proyecto)
-12. [Solución de problemas](#solución-de-problemas)
-13. [Pendientes](#pendientes)
+**Parte 1 — La solución integrada**
+1. [Arquitectura de la solución integrada (Fase 2)](#arquitectura-de-la-solución-integrada-fase-2)
+
+**Parte 2 — Mi módulo**
+
+2. [Mi módulo: Replicación asíncrona a NoSQL](#mi-módulo-replicación-asíncrona-a-nosql)
+   - [4.1 Funcionalidad y objetivo](#41-funcionalidad-y-objetivo)
+   - [4.2 Integración y responsabilidades](#42-integración-y-responsabilidades)
+   - [4.3 Decisión técnica](#43-decisión-técnica)
+   - [4.4 Instrucciones para probar el módulo](#44-instrucciones-para-probar-el-módulo)
+
+**Parte 3 — Detalle técnico del módulo**
+
+3. [Arquitectura del módulo (contenedores)](#arquitectura-del-módulo-contenedores)
+4. [Endpoints](#endpoints)
+5. [Tecnologías](#tecnologías)
+6. [Requisitos](#requisitos)
+7. [Cómo levantarlo](#cómo-levantarlo)
+8. [Cómo probarlo (demo del diff)](#cómo-probarlo-demo-del-diff)
+9. [Cómo funciona por dentro](#cómo-funciona-por-dentro)
+10. [Seguridad](#seguridad)
+11. [Decisiones de diseño](#decisiones-de-diseño)
+12. [Configuración (variables de entorno)](#configuración-variables-de-entorno)
+13. [Estructura del proyecto](#estructura-del-proyecto)
+14. [Solución de problemas](#solución-de-problemas)
 
 ---
 
-## Arquitectura
+# Parte 1 — La solución integrada
+
+## Arquitectura de la solución integrada (Fase 2)
+
+La Fase 2 agrega **cuatro funcionalidades nuevas** al sistema de la Oficina del Agua **sin modificar
+el monolito heredado** (AQUORA, CodeIgniter 3 + Bootstrap 5, base MariaDB/MySQL `oficina_agua_db`):
+
+1. Consulta pública con captcha.
+2. Chatbot con RAG.
+3. Envío de pagos a sistemas externos por colas.
+4. **Replicación asíncrona a NoSQL** ← este repositorio.
+
+Cada feature es un componente independiente en su propio repositorio. Este módulo se integra con la
+solución **únicamente a través de la base de datos del monolito**, que lee en modo de solo lectura;
+no llama a las otras features ni ellas a él.
+
+### Diagrama del módulo
+
+![Diagrama de flujo de la Feature 4](docs/feature4-replicacion-nosql.png)
+
+### Componentes y qué representa cada conexión
+
+| Componente | Tecnología | Qué hace |
+|---|---|---|
+| **Base de datos del monolito** | MariaDB · `oficina_agua_db` | Origen de los datos: `clientes`, `contadores`, `lecturas` y `pagos`. En este repositorio corre como **copia en Docker** con datos de prueba (puerto 3307). |
+| **Generate** | `POST /api/sync/resumen` | Punto de partida (Swagger o botón de la página). Crea el job y responde **202** con `jobId` y `verEn`. |
+| **GenerarJob** | `SyncJobService` | Registra el job en memoria con su estado y progreso; responde **409** si ya hay uno activo. |
+| **Thread** | `SyncJobRunner` (`@Async`, hilo `sync-job-1`) | Hace la replicación en segundo plano. |
+| **Amazon DynamoDB** | DynamoDB Local (Docker) · AWS SDK v2 | Destino NoSQL: tabla `resumen_cuentas`, un documento por contador. |
+| **GetJob** | `GET /api/sync/jobs/{jobId}` | Devuelve estado, progreso (0–100 %) y resultados del job. |
+| **Página de progreso** | `progreso.html` (HTML + JS) | Consulta GetJob cada segundo y muestra la barra y la tabla de resultados en vivo. |
+| **DynamoDB Admin** | Visor web (puerto 8001) | Permite ver los documentos guardados en DynamoDB. |
+
+| Conexión | Significado |
+|---|---|
+| Generate → GenerarJob | El `POST` crea el job y lanza el hilo; no espera a que termine. |
+| GenerarJob → Thread | Se entrega el trabajo al hilo `sync-job-1` (`@Async`). |
+| Thread → Base de datos | **1.** Lee el resumen de cada contador con `SELECT`, usuario `sync_reader` (solo lectura). |
+| Thread → DynamoDB | **2.** Compara la huella SHA-256 con la guardada. **3.** `putItem` solo si cambió; nunca borra. |
+| Thread → GenerarJob | **4.** Registra el avance y el resultado de cada contador. |
+| GetJob → GenerarJob | *Get Job / Response Job*: lee el estado actual del job. |
+| Página de progreso → GetJob | *Polling* cada segundo hasta que el job termina. |
+
+### Cómo se ejecuta
+
+Todo el módulo se levanta con **Docker Compose** desde la raíz del repositorio:
+
+```bash
+docker compose up -d --build
+```
+
+Levanta 4 contenedores: la copia de la base del monolito (`sync-monolito-db`), DynamoDB Local
+(`sync-dynamodb`), DynamoDB Admin (`sync-dynamodb-admin`) y el servicio (`sync-service`, puerto 8084).
+Los pasos de prueba están en [4.4](#44-instrucciones-para-probar-el-módulo).
+
+---
+
+# Parte 2 — Mi módulo
+
+## Mi módulo: Replicación asíncrona a NoSQL
+
+Además de este módulo, apoyé la **Feature 3 (Envío de pagos a sistemas externos por colas)** con el
+script SQL de la tabla `envios_banco` y la colección de Postman del servicio.
+
+### 4.1 Funcionalidad y objetivo
+
+**Qué construí:** un microservicio que copia, **en segundo plano**, el **resumen de cuenta de cada
+contador** (cliente, lecturas, total facturado, total pagado, saldo y última lectura) desde la base
+de datos del monolito hacia **DynamoDB**.
+
+**Qué problema resuelve:** la Oficina del Agua puede consultar los saldos de sus contadores en una base
+NoSQL rápida, **sin cargar la base de datos del sistema principal** y sin modificar el monolito.
+
+**Cómo funciona:**
+
+1. `POST /api/sync/resumen` crea un *job* y responde de inmediato **202 Accepted** con su `jobId` y
+   la URL para verlo (`verEn`).
+2. El job corre en otro hilo (`@Async`): lee el resumen de cada contador y lo compara con lo guardado
+   en DynamoDB. Solo inserta o actualiza lo que cambió; nunca borra.
+3. `GET /api/sync/jobs/{jobId}` devuelve el estado, el progreso (0–100 %) y el resultado de cada
+   contador. La página `/progreso.html?jobId=...` muestra esa misma información **en vivo**.
+
+### 4.2 Integración y responsabilidades
+
+| Se comunica con | Cómo | Por qué esa frontera |
+|---|---|---|
+| **Base de datos del monolito** | Solo lectura (`SELECT`) con el usuario `sync_reader` y conexiones en modo *read-only* | **Regla de oro: el monolito no se modifica.** Aunque el código tuviera un error, la base rechaza cualquier escritura (`ERROR 1142`). |
+| **DynamoDB** | `putItem` de un documento por contador | Es el destino NoSQL. Nunca se usa `deleteItem`: lo replicado se conserva. |
+| **Cliente / navegador** | API REST (contrato OpenAPI) y la página `progreso.html` | El cliente no espera a que termine la copia: recibe un `jobId` y consulta el avance. |
+| **Otras features** | Ninguna comunicación directa | Su única fuente es la base del monolito; si este servicio falla, no afecta al monolito ni a los demás módulos. |
+
+### 4.3 Decisión técnica
+
+**Detectar los cambios con una huella SHA-256 en lugar de comparar fechas.**
+
+- **El problema:** para replicar solo las diferencias hay que saber qué cambió. Lo usual es comparar una
+  columna de "fecha de modificación", pero las tablas `lecturas` y `pagos` del monolito **no la tienen**,
+  y agregarla obligaría a modificar el monolito, lo cual está prohibido.
+- **La solución:** por cada contador se calcula una **huella SHA-256** de sus datos de negocio y se guarda
+  junto al documento en DynamoDB. En cada replicación se compara la huella nueva con la guardada:
+  - no existe → se **inserta**;
+  - es distinta → se **actualiza**;
+  - es igual → **no se escribe nada**.
+- **Por qué es mejor que las alternativas:** copiar todo en cada corrida reescribiría siempre todos los
+  registros, y usar fechas requeriría cambiar el monolito. La huella detecta cualquier cambio sin tocar
+  el monolito y evita escrituras innecesarias en DynamoDB.
+
+Otras decisiones (respuesta 202 asíncrona, 409 si ya hay un job en curso, un documento por contador,
+*polling* de la página): ver [Decisiones de diseño](#decisiones-de-diseño).
+
+### 4.4 Instrucciones para probar el módulo
+
+**Requisitos previos:** Docker Desktop encendido. En Windows, usar Git Bash. No se necesitan
+credenciales externas: todo corre en contenedores locales con datos de prueba.
+
+**1. Iniciar los servicios** (desde la carpeta del repositorio):
+
+```bash
+docker compose up -d --build
+docker ps
+```
+
+Deben aparecer 4 contenedores: `sync-monolito-db` (copia de la base del monolito con datos de prueba),
+`sync-dynamodb`, `sync-dynamodb-admin` y `sync-service`.
+
+**2. Flujo de prueba:**
+
+| Paso | Acción | Resultado esperado |
+|---|---|---|
+| 1 | Abrir **http://localhost:8084/progreso.html** y presionar **Iniciar replicación** | Barra de 0 a 100 % y tabla llenándose fila por fila: **8 contadores · 8 insertados** |
+| 2 | Presionar **Nueva replicación** sin cambiar nada | **8 sin cambios** (no se escribió nada en DynamoDB) |
+| 3 | Simular actividad en el monolito (comando abajo): un pago nuevo y un contador nuevo | — |
+| 4 | Presionar **Nueva replicación** | **9 contadores · 1 insertado (`CNT-0009`) · 1 actualizado (`CNT-0001`, saldo Q 37.50 → Q 0.00) · 7 sin cambios** |
+| 5 | Abrir **http://localhost:8001** → tabla `resumen_cuentas` | Un documento por contador, incluido `CNT-0009` |
+
+Comando del paso 3 (no muestra nada si sale bien):
+
+```bash
+docker exec -i sync-monolito-db sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" oficina_agua_db' < db/demo/cambios-en-el-monolito.sql
+```
+
+**3. Otras URL útiles:**
+
+- Swagger UI (probar la API): http://localhost:8084/swagger-ui.html
+- Estado del servicio: http://localhost:8084/actuator/health
+
+Para volver a empezar desde cero: `docker compose down -v && docker compose up -d --build`.
+
+---
+
+# Parte 3 — Detalle técnico del módulo
+
+## Arquitectura del módulo (contenedores)
 
 ```
                       ┌──────────────────────── docker compose ────────────────────────┐
@@ -218,7 +391,7 @@ JOB=$(curl -s -X POST http://localhost:8084/api/sync/resumen | grep -oE '[0-9a-f
 **Paso 3 — simular actividad en el monolito** (se ejecuta como `root`, "como si fuera AQUORA"; no imprime nada si sale bien):
 
 ```bash
-docker exec -i sync-monolito-db mariadb -uroot -proot_password oficina_agua_db < db/demo/cambios-en-el-monolito.sql
+docker exec -i sync-monolito-db sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" oficina_agua_db' < db/demo/cambios-en-el-monolito.sql
 ```
 
 El script hace dos cosas:
@@ -336,14 +509,16 @@ Tabla `resumen_cuentas`, clave primaria `contadorId` (número). Un item por cont
   permiso `SELECT`. Aunque el código tuviera un error, la BD rechazaría cualquier escritura:
 
   ```bash
-  docker exec sync-monolito-db mariadb -usync_reader -psync_reader_pw oficina_agua_db -e "DELETE FROM pagos;"
+  docker exec -it sync-monolito-db mariadb -usync_reader -p oficina_agua_db -e "DELETE FROM pagos;"
+  # (pide la contraseña del usuario sync_reader)
   # ERROR 1142 (42000): DELETE command denied to user 'sync_reader'
   ```
 
 - **Conexiones en modo lectura** (`spring.datasource.hikari.read-only: true`): segunda barrera.
 - **Sin credenciales en la imagen ni en el código:** todo llega por variables de entorno.
 - **Errores sin detalles internos:** `include-stacktrace: never`; el detalle de un 500 solo va al log.
-- Las contraseñas de este repo (`sync_reader_pw`, `root_password`) son **solo para el entorno local**.
+- **Ninguna credencial real en el repositorio:** las únicas contraseñas son las de los contenedores de prueba locales
+  (base de datos con datos ficticios) y no corresponden a ningún sistema real. No se publican claves de AWS, tokens ni archivos `.env`.
 
 ---
 
@@ -353,7 +528,7 @@ Tabla `resumen_cuentas`, clave primaria `contadorId` (número). Un item por cont
 |---|---|
 | **Diff por huella SHA-256** en vez de fechas | Las tablas `lecturas` y `pagos` del monolito no tienen `actualizado_en`, así que no se puede saber por fecha qué cambió. La huella detecta cualquier cambio en los datos del resumen. |
 | **Upsert con `putItem`, nunca `deleteItem`** | Requisito de la feature: el destino conserva todo lo replicado. |
-| **Un documento por contador** | Es la unidad que consulta el cliente (estado de cuenta por contador). *Pendiente de confirmar con el equipo.* |
+| **Un documento por contador** | Es la unidad del estado de cuenta: cada contador tiene sus propias lecturas, facturación y saldo, y un cliente puede tener varios contadores. |
 | **`JdbcTemplate` en vez de entidades JPA** | Solo se necesita **leer** el resultado de una consulta agregada de 4 tablas; no se crean, editan ni borran registros. |
 | **Jobs en memoria** (`ConcurrentHashMap`) | Suficiente para la fase local. Si el servicio se reinicia, el historial de jobs se pierde, pero los datos ya replicados quedan en DynamoDB. |
 | **Página con *polling* cada segundo** (en vez de WebSockets/SSE) | Es lo más simple de entender y depurar: la página usa el mismo `GET` que cualquier cliente. Con un job de segundos o minutos, 1 consulta por segundo no carga al servicio. |
@@ -373,7 +548,7 @@ Tabla `resumen_cuentas`, clave primaria `contadorId` (número). Un item por cont
 | `SERVER_PORT` | `8084` | Puerto HTTP |
 | `DB_URL` | `jdbc:mariadb://localhost:3307/oficina_agua_db` | BD del monolito (origen) |
 | `DB_USERNAME` | `sync_reader` | Usuario de **solo lectura** |
-| `DB_PASSWORD` | `sync_reader_pw` | Contraseña (solo local) |
+| `DB_PASSWORD` | valor de prueba local | Contraseña del usuario de solo lectura |
 | `DYNAMODB_ENDPOINT` | `http://localhost:8000` | DynamoDB Local. **Vacío = DynamoDB real de AWS** |
 | `AWS_REGION` | `us-east-2` | Región |
 | `DYNAMODB_TABLE` | `resumen_cuentas` | Tabla destino (se crea sola si no existe) |
@@ -391,6 +566,9 @@ fase2-feature4-replicacion-nosql/
 ├── Dockerfile                         # imagen multi-stage (compila y ejecuta)
 ├── docker-compose.yml                 # monolito-db + dynamodb-local + dynamodb-admin + sync-service
 ├── pom.xml
+├── docs/
+│   ├── feature4-replicacion-nosql.png    # diagrama del módulo
+│   └── feature4-replicacion-nosql.drawio # mismo diagrama, editable en draw.io
 ├── db/
 │   ├── init/
 │   │   ├── 01-schema.sql              # copia del esquema de AQUORA (migraciones de la fase 1)
@@ -428,11 +606,3 @@ y **no se versiona**.
 | `ClassNotFoundException` al correr con `java -jar` | VS Code compiló encima de `target/` | Cerrar VS Code y `mvn clean package` |
 | `No such file or directory` al correr el script de demo | No estás en la carpeta del proyecto | `cd ~/proyectos/fase2-feature4-replicacion-nosql` |
 | Quiero empezar de cero | — | `docker compose down -v && docker compose up -d --build` |
-
----
-
-## Pendientes
-
-- [ ] Confirmar con el equipo el contenido del "resumen" (un documento por contador).
-- [ ] Despliegue en AWS (ECR + ECS Fargate + DynamoDB real), si se autoriza.
-- [ ] Pull Request de `feature/contrato-openapi` hacia `main`.
